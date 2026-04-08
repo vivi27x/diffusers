@@ -13,14 +13,14 @@
 # limitations under the License.
 
 import inspect
-from typing import Any, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import PIL.Image
 import torch
 from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
 
 from ...image_processor import PipelineImageInput, VaeImageProcessor
-from ...loaders import FromSingleFileMixin, StableDiffusionXLLoraLoaderMixin, TextualInversionLoaderMixin
+from ...loaders import FromSingleFileMixin, IPAdapterMixin, StableDiffusionXLLoraLoaderMixin, TextualInversionLoaderMixin
 from ...models import AutoencoderKL, UNet2DConditionModel
 from ...models.lora import adjust_lora_scale_text_encoder
 from ...schedulers import KarrasDiffusionSchedulers
@@ -116,6 +116,7 @@ class StableDiffusionXLInstructPix2PixPipeline(
     TextualInversionLoaderMixin,
     FromSingleFileMixin,
     StableDiffusionXLLoraLoaderMixin,
+    IPAdapterMixin,
 ):
     r"""
     Pipeline for pixel-level image editing by following text instructions. Based on Stable Diffusion XL.
@@ -128,6 +129,7 @@ class StableDiffusionXLInstructPix2PixPipeline(
         - [`~loaders.FromSingleFileMixin.from_single_file`] for loading `.ckpt` files
         - [`~loaders.StableDiffusionXLLoraLoaderMixin.load_lora_weights`] for loading LoRA weights
         - [`~loaders.StableDiffusionXLLoraLoaderMixin.save_lora_weights`] for saving LoRA weights
+        - [`~loaders.IPAdapterMixin.load_ip_adapter`] for loading IP Adapters
 
     Args:
         vae ([`AutoencoderKL`]):
@@ -166,8 +168,8 @@ class StableDiffusionXLInstructPix2PixPipeline(
             When set the image latents are scaled.
     """
 
-    model_cpu_offload_seq = "text_encoder->text_encoder_2->unet->vae"
-    _optional_components = ["tokenizer", "tokenizer_2", "text_encoder", "text_encoder_2"]
+    model_cpu_offload_seq = "text_encoder->text_encoder_2->image_encoder->unet->vae"
+    _optional_components = ["tokenizer", "tokenizer_2", "text_encoder", "text_encoder_2", "image_encoder", "feature_extractor"]
 
     def __init__(
         self,
@@ -178,6 +180,8 @@ class StableDiffusionXLInstructPix2PixPipeline(
         tokenizer_2: CLIPTokenizer,
         unet: UNet2DConditionModel,
         scheduler: KarrasDiffusionSchedulers,
+        image_encoder=None,
+        feature_extractor=None,
         force_zeros_for_empty_prompt: bool = True,
         add_watermarker: bool | None = None,
         is_cosxl_edit: bool | None = False,
@@ -192,6 +196,8 @@ class StableDiffusionXLInstructPix2PixPipeline(
             tokenizer_2=tokenizer_2,
             unet=unet,
             scheduler=scheduler,
+            image_encoder=image_encoder,
+            feature_extractor=feature_extractor,
         )
         self.register_to_config(force_zeros_for_empty_prompt=force_zeros_for_empty_prompt)
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1) if getattr(self, "vae", None) else 8
@@ -592,6 +598,86 @@ class StableDiffusionXLInstructPix2PixPipeline(
         )
         self.vae.to(dtype=torch.float32)
 
+    def encode_image(self, image, device, num_images_per_prompt, output_hidden_states=None):
+        dtype = next(self.image_encoder.parameters()).dtype
+
+        if not isinstance(image, torch.Tensor):
+            from transformers import CLIPImageProcessor
+
+            feature_extractor = getattr(self, "feature_extractor", None)
+            if feature_extractor is None:
+                feature_extractor = CLIPImageProcessor()
+            image = feature_extractor(image, return_tensors="pt").pixel_values
+
+        image = image.to(device=device, dtype=dtype)
+        if output_hidden_states:
+            image_enc_hidden_states = self.image_encoder(image, output_hidden_states=True).hidden_states[-2]
+            image_enc_hidden_states = image_enc_hidden_states.repeat_interleave(num_images_per_prompt, dim=0)
+            uncond_image_enc_hidden_states = self.image_encoder(
+                torch.zeros_like(image), output_hidden_states=True
+            ).hidden_states[-2]
+            uncond_image_enc_hidden_states = uncond_image_enc_hidden_states.repeat_interleave(
+                num_images_per_prompt, dim=0
+            )
+            return image_enc_hidden_states, uncond_image_enc_hidden_states
+        else:
+            image_embeds = self.image_encoder(image).image_embeds
+            image_embeds = image_embeds.repeat_interleave(num_images_per_prompt, dim=0)
+            uncond_image_embeds = torch.zeros_like(image_embeds)
+
+            return image_embeds, uncond_image_embeds
+
+    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_ip_adapter_image_embeds
+    def prepare_ip_adapter_image_embeds(
+        self, ip_adapter_image, ip_adapter_image_embeds, device, num_images_per_prompt, do_classifier_free_guidance
+    ):
+        try:
+            from ...models.embeddings import ImageProjection
+        except ImportError:
+            from ...models.attention_processor import ImageProjection
+
+        image_embeds = []
+        if do_classifier_free_guidance:
+            negative_image_embeds = []
+        if ip_adapter_image_embeds is None:
+            if not isinstance(ip_adapter_image, list):
+                ip_adapter_image = [ip_adapter_image]
+
+            if len(ip_adapter_image) != len(self.unet.encoder_hid_proj.image_projection_layers):
+                raise ValueError(
+                    f"`ip_adapter_image` must have same length as the number of IP Adapters. Got {len(ip_adapter_image)} images and {len(self.unet.encoder_hid_proj.image_projection_layers)} IP Adapters."
+                )
+
+            for single_ip_adapter_image, image_proj_layer in zip(
+                ip_adapter_image, self.unet.encoder_hid_proj.image_projection_layers
+            ):
+                output_hidden_state = not isinstance(image_proj_layer, ImageProjection)
+                single_image_embeds, single_negative_image_embeds = self.encode_image(
+                    single_ip_adapter_image, device, 1, output_hidden_state
+                )
+
+                image_embeds.append(single_image_embeds[None, :])
+                if do_classifier_free_guidance:
+                    negative_image_embeds.append(single_negative_image_embeds[None, :])
+        else:
+            for single_image_embeds in ip_adapter_image_embeds:
+                if do_classifier_free_guidance:
+                    single_negative_image_embeds, single_image_embeds = single_image_embeds.chunk(2)
+                    negative_image_embeds.append(single_negative_image_embeds)
+                image_embeds.append(single_image_embeds)
+
+        ip_adapter_image_embeds = []
+        for i, single_image_embeds in enumerate(image_embeds):
+            single_image_embeds = torch.cat([single_image_embeds] * num_images_per_prompt, dim=0)
+            if do_classifier_free_guidance:
+                single_negative_image_embeds = torch.cat([negative_image_embeds[i]] * num_images_per_prompt, dim=0)
+                single_image_embeds = torch.cat([single_negative_image_embeds, single_image_embeds], dim=0)
+
+            single_image_embeds = single_image_embeds.to(device=device)
+            ip_adapter_image_embeds.append(single_image_embeds)
+
+        return ip_adapter_image_embeds
+
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
@@ -624,6 +710,8 @@ class StableDiffusionXLInstructPix2PixPipeline(
         original_size: tuple[int, int] = None,
         crops_coords_top_left: tuple[int, int] = (0, 0),
         target_size: tuple[int, int] = None,
+        ip_adapter_image: Optional[Union["PIL.Image.Image", List["PIL.Image.Image"]]] = None,
+        ip_adapter_image_embeds: Optional[List[torch.FloatTensor]] = None,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -799,6 +887,29 @@ class StableDiffusionXLInstructPix2PixPipeline(
             lora_scale=text_encoder_lora_scale,
         )
 
+        # 3b. Prepare IP Adapter image embeddings
+        if ip_adapter_image is not None or ip_adapter_image_embeds is not None:
+            ip_image_embeds = self.prepare_ip_adapter_image_embeds(
+                ip_adapter_image,
+                ip_adapter_image_embeds,
+                device,
+                batch_size * num_images_per_prompt,
+                do_classifier_free_guidance,
+            )
+
+            # Reshape for 3-way CFG: InstructPix2Pix splits the batch into
+            # [text_cond, image_cond, uncond]. prepare_ip_adapter_image_embeds
+            # returns 2-way [uncond, cond] when CFG is enabled, so we must
+            # reshape to [cond, cond, uncond] to match.
+            if do_classifier_free_guidance:
+                formatted_image_embeds = []
+                for emb in ip_image_embeds:
+                    uncond_emb, cond_emb = emb.chunk(2)
+                    formatted_image_embeds.append(torch.cat([cond_emb, cond_emb, uncond_emb], dim=0))
+                ip_image_embeds = formatted_image_embeds
+        else:
+            ip_image_embeds = None
+
         # 4. Preprocess image
         image = self.image_processor.preprocess(image, height=height, width=width).to(device)
 
@@ -895,6 +1006,8 @@ class StableDiffusionXLInstructPix2PixPipeline(
 
                 # predict the noise residual
                 added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
+                if ip_image_embeds is not None:
+                    added_cond_kwargs["image_embeds"] = ip_image_embeds
                 noise_pred = self.unet(
                     scaled_latent_model_input,
                     t,
