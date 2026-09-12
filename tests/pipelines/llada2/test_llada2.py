@@ -1,5 +1,4 @@
-import unittest
-
+import pytest
 import torch
 
 from diffusers import BlockRefinementScheduler, LLaDA2Pipeline
@@ -41,7 +40,7 @@ def _make_pipeline(tokenizer=None):
     return LLaDA2Pipeline(model=model, scheduler=scheduler, tokenizer=tokenizer)
 
 
-class LLaDA2PipelineTest(unittest.TestCase):
+class TestLLaDA2Pipeline:
     def test_pipeline_runs(self):
         pipe = _make_pipeline().to("cpu")
 
@@ -61,8 +60,8 @@ class LLaDA2PipelineTest(unittest.TestCase):
             output_type="seq",
         )
 
-        self.assertEqual(out.sequences.shape, (2, 24))
-        self.assertFalse((out.sequences == 31).any().item())
+        assert out.sequences.shape == (2, 24)
+        assert not (out.sequences == 31).any().item()
 
     def test_pipeline_return_tuple(self):
         pipe = _make_pipeline().to("cpu")
@@ -83,8 +82,8 @@ class LLaDA2PipelineTest(unittest.TestCase):
             return_dict=False,
         )
 
-        self.assertEqual(sequences.shape, (1, 16))
-        self.assertIsNone(texts)
+        assert sequences.shape == (1, 16)
+        assert texts is None
 
     def test_output_type_seq(self):
         """output_type='seq' should return sequences but no texts."""
@@ -104,9 +103,9 @@ class LLaDA2PipelineTest(unittest.TestCase):
             output_type="seq",
         )
 
-        self.assertIsNotNone(out.sequences)
-        self.assertEqual(out.sequences.shape, (1, 16))
-        self.assertIsNone(out.texts)
+        assert out.sequences is not None
+        assert out.sequences.shape == (1, 16)
+        assert out.texts is None
 
     def test_output_type_text_without_tokenizer(self):
         """output_type='text' without a tokenizer should return texts=None."""
@@ -126,8 +125,8 @@ class LLaDA2PipelineTest(unittest.TestCase):
             output_type="text",
         )
 
-        self.assertIsNotNone(out.sequences)
-        self.assertIsNone(out.texts)
+        assert out.sequences is not None
+        assert out.texts is None
 
     def test_output_type_text_with_tokenizer(self):
         """output_type='text' with a tokenizer should return decoded texts."""
@@ -155,16 +154,16 @@ class LLaDA2PipelineTest(unittest.TestCase):
             output_type="text",
         )
 
-        self.assertIsNotNone(out.sequences)
-        self.assertIsNotNone(out.texts)
-        self.assertEqual(len(out.texts), 1)
-        self.assertTrue(out.texts[0].startswith("decoded_"))
+        assert out.sequences is not None
+        assert out.texts is not None
+        assert len(out.texts) == 1
+        assert out.texts[0].startswith("decoded_")
 
     def test_output_type_invalid_raises(self):
         """Invalid output_type should raise ValueError."""
         pipe = _make_pipeline().to("cpu")
 
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             pipe(
                 input_ids=torch.tensor([[5, 6, 7, 8]], dtype=torch.long),
                 use_chat_template=False,
@@ -178,7 +177,7 @@ class LLaDA2PipelineTest(unittest.TestCase):
     def test_prepare_input_ids_from_tensor(self):
         pipe = _make_pipeline()
         ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
-        result = pipe._prepare_input_ids(
+        result_ids, result_mask = pipe._prepare_input_ids(
             prompt=None,
             messages=None,
             input_ids=ids,
@@ -186,12 +185,14 @@ class LLaDA2PipelineTest(unittest.TestCase):
             add_generation_prompt=False,
             chat_template_kwargs=None,
         )
-        self.assertTrue(torch.equal(result, ids))
+        assert torch.equal(result_ids, ids)
+        assert result_mask.shape == ids.shape
+        assert (result_mask == 1).all().item()
 
     def test_prepare_input_ids_from_1d_tensor(self):
         pipe = _make_pipeline()
         ids = torch.tensor([1, 2, 3], dtype=torch.long)
-        result = pipe._prepare_input_ids(
+        result_ids, result_mask = pipe._prepare_input_ids(
             prompt=None,
             messages=None,
             input_ids=ids,
@@ -199,11 +200,12 @@ class LLaDA2PipelineTest(unittest.TestCase):
             add_generation_prompt=False,
             chat_template_kwargs=None,
         )
-        self.assertEqual(result.shape, (1, 3))
+        assert result_ids.shape == (1, 3)
+        assert result_mask.shape == (1, 3)
 
     def test_prepare_input_ids_no_tokenizer_raises(self):
         pipe = _make_pipeline(tokenizer=None)
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             pipe._prepare_input_ids(
                 prompt="hello",
                 messages=None,
@@ -217,7 +219,7 @@ class LLaDA2PipelineTest(unittest.TestCase):
         pipe = _make_pipeline()
         # Manually set tokenizer to a simple object so _prepare_input_ids doesn't short-circuit
         pipe.tokenizer = type("Tok", (), {"eos_token_id": None, "mask_token_id": None})()
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             pipe._prepare_input_ids(
                 prompt="hello",
                 messages=[{"role": "user", "content": "hi"}],
@@ -230,7 +232,7 @@ class LLaDA2PipelineTest(unittest.TestCase):
     def test_prepare_input_ids_neither_raises(self):
         pipe = _make_pipeline()
         pipe.tokenizer = type("Tok", (), {"eos_token_id": None, "mask_token_id": None})()
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             pipe._prepare_input_ids(
                 prompt=None,
                 messages=None,
@@ -241,5 +243,172 @@ class LLaDA2PipelineTest(unittest.TestCase):
             )
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestLLaDA2Regression:
+    """Pin the regressions identified in https://github.com/huggingface/diffusers/issues/13598."""
+
+    def test_attention_mask_carried_through_for_pre_tokenized_input(self):
+        """Issue #1: explicit `attention_mask` must reach the model and zero out padded prompt
+        positions and the block-aligned tail past `prompt_length + gen_length`."""
+        captured: list[torch.Tensor] = []
+
+        class _MaskCapturingModel(_DummyCausalLM):
+            def forward(self, input_ids, attention_mask=None, position_ids=None, **kwargs):
+                captured.append(attention_mask.detach().cpu().clone() if attention_mask is not None else None)
+                return super().forward(input_ids, attention_mask=attention_mask, position_ids=position_ids)
+
+        model = _MaskCapturingModel(vocab_size=32)
+        scheduler = BlockRefinementScheduler()
+        pipe = LLaDA2Pipeline(model=model, scheduler=scheduler).to("cpu")
+
+        input_ids = torch.tensor([[10, 11, 12, 0], [20, 0, 0, 0]], dtype=torch.long)
+        attention_mask = torch.tensor([[1, 1, 1, 0], [1, 0, 0, 0]], dtype=torch.long)
+
+        pipe(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_chat_template=False,
+            gen_length=4,
+            block_length=4,
+            num_inference_steps=2,
+            threshold=2.0,
+            mask_token_id=31,
+            eos_token_id=None,
+            eos_early_stop=False,
+            output_type="seq",
+        )
+
+        assert len(captured) > 0
+        first_mask = captured[0]
+        # Padded prompt positions stay zero in the runtime mask (Issue #1).
+        assert first_mask[0, 3].item() == 0
+        assert first_mask[1, 1].item() == 0
+        assert first_mask[1, 2].item() == 0
+        assert first_mask[1, 3].item() == 0
+        # Real prompt positions stay one.
+        assert first_mask[0, 0].item() == 1
+        assert first_mask[1, 0].item() == 1
+
+    def test_block_length_routes_into_scheduler_transfer_schedule(self):
+        """Issue #2: the per-call `block_length` must drive the scheduler's `_transfer_schedule`."""
+        commits: list[int] = []
+
+        def cb(pipe, step, timestep, kwargs):
+            commits.append(int(kwargs["transfer_index"].sum()))
+            return {}
+
+        pipe = _make_pipeline().to("cpu")
+        pipe(
+            input_ids=torch.empty((1, 0), dtype=torch.long),
+            use_chat_template=False,
+            gen_length=8,
+            block_length=8,
+            num_inference_steps=8,
+            threshold=2.0,
+            mask_token_id=31,
+            eos_token_id=None,
+            eos_early_stop=False,
+            output_type="seq",
+            callback_on_step_end=cb,
+            callback_on_step_end_tensor_inputs=["transfer_index"],
+        )
+        # With block_length=num_inference_steps=8 the schedule commits exactly one token per step.
+        assert commits[0] == 1
+        assert commits[1] == 1
+        assert commits[2] == 1
+
+    def test_callback_tensor_inputs_advertised_keys_resolve(self):
+        """Issue #3: every advertised callback key must be a bound local at callback time."""
+        observed: list[str] = []
+
+        def cb(pipe, step, timestep, kwargs):
+            observed.extend(sorted(kwargs.keys()))
+            return {}
+
+        pipe = _make_pipeline().to("cpu")
+        keys = list(pipe._callback_tensor_inputs)
+        pipe(
+            input_ids=torch.tensor([[5, 6, 7, 8]], dtype=torch.long),
+            use_chat_template=False,
+            gen_length=8,
+            block_length=8,
+            num_inference_steps=4,
+            threshold=2.0,
+            mask_token_id=31,
+            eos_token_id=None,
+            eos_early_stop=False,
+            output_type="seq",
+            callback_on_step_end=cb,
+            callback_on_step_end_tensor_inputs=keys,
+        )
+        assert set(observed) == set(keys)
+
+    def test_eos_at_first_generated_position_triggers_finished(self):
+        """Issue #4: EOS exactly at index `prompt_length` must mark the row finished."""
+        cur_x = torch.tensor([[10, 2, 99]])
+        sampled_tokens = torch.tensor([[0, 2]])
+        final_transfer = torch.tensor([[False, True]])
+        finished = BlockRefinementScheduler.check_eos_finished(
+            cur_x=cur_x,
+            sampled_tokens=sampled_tokens,
+            final_transfer=final_transfer,
+            finished=torch.tensor([False]),
+            eos_token_id=2,
+            mask_token_id=99,
+            prompt_length=1,
+        )
+        assert bool(finished[0].item())
+
+    def test_finished_rows_are_frozen_for_subsequent_blocks(self):
+        """Issue #5: once a row emits EOS, later blocks must not overwrite its committed tokens."""
+
+        class _EosThenJunkModel(_DummyCausalLM):
+            """Row 0 commits EOS in the first block, then later blocks would emit token 7. Row 1 keeps emitting token 6."""
+
+            def forward(self, input_ids, attention_mask=None, position_ids=None, **kwargs):
+                batch_size, seq_len = input_ids.shape
+                logits = torch.zeros((batch_size, seq_len, self.vocab_size), device=input_ids.device)
+                # First block (seq_len <= 3): row 0 emits 5 then EOS=2; row 1 emits 6.
+                if seq_len <= 3:
+                    logits[0, :, 5] = 10
+                    logits[0, 2, 2] = 20  # strong EOS at last block position
+                    logits[1, :, 6] = 10
+                else:
+                    logits[0, :, 7] = 10  # would overwrite row 0's prior tokens if not frozen
+                    logits[1, :, 6] = 10
+                return _DummyModelOutput(logits=logits)
+
+        model = _EosThenJunkModel(vocab_size=32)
+        pipe = LLaDA2Pipeline(model=model, scheduler=BlockRefinementScheduler()).to("cpu")
+        out = pipe(
+            input_ids=torch.tensor([[10], [20]], dtype=torch.long),
+            use_chat_template=False,
+            gen_length=5,
+            block_length=3,
+            num_inference_steps=3,
+            threshold=2.0,
+            mask_token_id=31,
+            eos_token_id=2,
+            eos_early_stop=True,
+            output_type="seq",
+        )
+        # Row 0's first generated tokens must not be overwritten by later-block sampling (token 7).
+        assert 7 not in out.sequences[0].tolist()[:2]
+
+    def test_progress_bar_disable_is_preserved_after_call(self):
+        """Issue #6: calling the pipeline must not mutate `_progress_bar_config`."""
+        pipe = _make_pipeline().to("cpu")
+        pipe.set_progress_bar_config(disable=True)
+        before = dict(pipe._progress_bar_config)
+        pipe(
+            input_ids=torch.tensor([[5, 6, 7, 8]], dtype=torch.long),
+            use_chat_template=False,
+            gen_length=8,
+            block_length=8,
+            num_inference_steps=2,
+            threshold=2.0,
+            mask_token_id=31,
+            eos_token_id=None,
+            eos_early_stop=False,
+            output_type="seq",
+        )
+        assert pipe._progress_bar_config == before

@@ -36,7 +36,7 @@ from accelerate import PartialState
 from diffusers import DiffusionPipeline
 
 pipeline = DiffusionPipeline.from_pretrained(
-    "Qwen/Qwen-Image", torch_dtype=torch.float16
+    "Qwen/Qwen-Image", dtype=torch.float16
 )
 distributed_state = PartialState()
 pipeline.to(distributed_state.device)
@@ -73,7 +73,7 @@ import torch.multiprocessing as mp
 from diffusers import DiffusionPipeline
 
 pipeline = DiffusionPipeline.from_pretrained(
-    "Qwen/Qwen-Image", torch_dtype=torch.float16,
+    "Qwen/Qwen-Image", dtype=torch.float16,
 )
 ```
 
@@ -135,7 +135,7 @@ pipeline = FluxPipeline.from_pretrained(
     vae=None,
     device_map="balanced",
     max_memory={0: "16GB", 1: "16GB"},
-    torch_dtype=torch.bfloat16
+    dtype=torch.bfloat16
 )
 with torch.no_grad():
     print("Encoding prompts.")
@@ -174,7 +174,7 @@ transformer = AutoModel.from_pretrained(
     "black-forest-labs/FLUX.1-dev", 
     subfolder="transformer",
     device_map="auto",
-    torch_dtype=torch.bfloat16
+    dtype=torch.bfloat16
 )
 ```
 
@@ -192,7 +192,7 @@ pipeline = FluxPipeline.from_pretrained(
     tokenizer_2=None,
     vae=None,
     transformer=transformer,
-    torch_dtype=torch.bfloat16
+    dtype=torch.bfloat16
 )
 
 print("Running denoising.")
@@ -215,7 +215,7 @@ import torch
 from diffusers import AutoencoderKL
 from diffusers.image_processor import VaeImageProcessor
 
-vae = AutoencoderKL.from_pretrained(ckpt_id, subfolder="vae", torch_dtype=torch.bfloat16).to("cuda")
+vae = AutoencoderKL.from_pretrained(ckpt_id, subfolder="vae", dtype=torch.bfloat16).to("cuda")  # or "mps", "xpu", "cpu"
 vae_scale_factor = 2 ** (len(vae.config.block_out_channels) - 1)
 image_processor = VaeImageProcessor(vae_scale_factor=vae_scale_factor)
 
@@ -263,7 +263,7 @@ def main():
     world_size = dist.get_world_size()
 
     pipeline = DiffusionPipeline.from_pretrained(
-        "black-forest-labs/FLUX.1-dev", torch_dtype=torch.bfloat16
+        "black-forest-labs/FLUX.1-dev", dtype=torch.bfloat16
     ).to(device)
     pipeline.transformer.set_attention_backend("_native_cudnn")
 
@@ -371,6 +371,47 @@ We ran a benchmark for FLUX.1-dev with Ulysses, Ring, Unified Attention and Ulys
 
 From the above table, it is clear that Ulysses Anything Attention offers better compatibility with arbitrary sequence lengths while maintaining the same performance as the standard Ulysses Attention.
 
+
+### Ring Anything Attention
+
+The default [Ring Attention](https://huggingface.co/papers/2310.01889) requires the sequence length of hidden states to be evenly divisible across the ring degree. [Ring Anything Attention](https://github.com/huggingface/diffusers/pull/13545#issuecomment-4302195582) is a variant of Ring Attention that supports arbitrary (non-evenly divisible) sequence lengths. It pads each rank's local KV to the global maximum sequence length, all-gathers the padded KV buffer, and slices back to each rank's true length before running attention.
+
+Ring Anything Attention is not supported by Unified Attention. Set `ring_degree > 1` and `ring_anything=True` to enable Ring Anything Attention.
+
+```py
+pipeline.transformer.enable_parallelism(config=ContextParallelConfig(ring_degree=2, ring_anything=True))
+```
+
+> [!TIP]
+> Add the `gloo` backend to [init_process_group](https://docs.pytorch.org/docs/stable/distributed.html#torch.distributed.init_process_group) to avoid multiple forced CUDA syncs from H2D and D2H transfers.
+
+```py
+import torch.distributed as dist
+
+dist.init_process_group(backend="cpu:gloo,cuda:nccl")
+```
+
+> [!NOTE]
+> Ring Anything Attention only currently supports inference and non-`None` attention masks aren't supported. `attn_mask` must be `None`.
+
+See the FLUX.1-dev benchmarks below on a node of 4 RTX 4090 (48GB) GPUs.
+
+| CP Backend         | Time / Iter (ms) | Steps / Sec | Peak Memory (GB) | Shape (HxW)|
+|--------------------|------------------|-------------|------------------|------------|
+| ulysses            |   259.07         |    3.86     |     33.83        | 1024x1024  |
+| ring               |   338.98         |    2.95     |     33.83        | 1024x1024  |
+| unified_balanced   |   321.54         |    3.11     |     33.83        | 1024x1024  |
+| ulysses_anything   |   259.07         |    3.86     |     33.83        | 1024x1024  |
+| ring_anything      |   340.14         |    2.94     |     33.83        | 1024x1024  |
+| ulysses            |   failed         |    failed   |     failed       | 1008x1008  |
+| ring               |   failed         |    failed   |     failed       | 1008x1008  |
+| unified_balanced   |   failed         |    failed   |     failed       | 1008x1008  |
+| ulysses_anything   |   253.16         |    3.95     |     33.75        | 1008x1008  |
+| ring_anything      |   335.57         |    2.98     |     33.75        | 1008x1008  |
+
+From the above table, Ring Anything Attention offers compatibility with arbitrary sequence lengths while maintaining performance comparable to the standard Ring Attention.
+For more details on the motivation and trade-offs for Ring Anything Attention, see [this comment](https://github.com/huggingface/diffusers/pull/13545#issuecomment-4304104462).
+
 ### parallel_config
 
 Pass `parallel_config` during model initialization to enable context parallelism.
@@ -382,11 +423,141 @@ cp_config = ContextParallelConfig(ring_degree=2)
 transformer = AutoModel.from_pretrained(
     CKPT_ID, 
     subfolder="transformer", 
-    torch_dtype=torch.bfloat16, 
+    dtype=torch.bfloat16,
     parallel_config=cp_config
 )
 
 pipeline = DiffusionPipeline.from_pretrained(
-    CKPT_ID, transformer=transformer, torch_dtype=torch.bfloat16,
+    CKPT_ID, transformer=transformer, dtype=torch.bfloat16,
 ).to(device)
 ```
+
+## Tensor parallelism
+
+[Tensor parallelism](https://huggingface.co/spaces/nanotron/ultrascale-playbook?section=tensor_parallelism) shards the weight matrices of a model across devices. Each device holds a column-wise (`"colwise"`) or row-wise (`"rowwise"`) slice of each layer, computes a partial result, and an `AllReduce`/`AllGather` at the layer boundary reconstructs the full output. Unlike context parallelism, it reduces the per-device *weight* memory, which is useful for models that do not fit on a single device.
+
+Pass a [`TensorParallelConfig`] to [`~ModelMixin.enable_parallelism`]. `tp_degree` is the number of devices to shard across and must divide the model's number of attention heads. The model must define a `_tp_plan` (a flat mapping of module-name globs to a `"colwise"`/`"rowwise"` style).
+
+```py
+import torch
+from torch import distributed as dist
+from diffusers import DiffusionPipeline, TensorParallelConfig
+
+def setup_distributed():
+    if not dist.is_initialized():
+        dist.init_process_group(backend="nccl")
+    rank = dist.get_rank()
+    device = torch.device(f"cuda:{rank}")
+    torch.cuda.set_device(device)
+    return device
+
+def main():
+    device = setup_distributed()
+    world_size = dist.get_world_size()
+
+    pipeline = DiffusionPipeline.from_pretrained(
+        "black-forest-labs/FLUX.2-dev", torch_dtype=torch.bfloat16
+    )  # weights stay on CPU
+
+    # Shard the transformer first, then move only each rank's slice onto the accelerator.
+    pipeline.transformer.enable_parallelism(config=TensorParallelConfig(tp_degree=world_size))
+    pipeline.transformer.to(device)
+
+    # Move the remaining, non-sharded components onto the accelerator individually.
+    pipeline.text_encoder.to(device)
+    pipeline.vae.to(device)
+
+    generator = torch.Generator().manual_seed(42)
+    image = pipeline(prompt="a cat holding a sign that says hello", generator=generator).images[0]
+    if dist.get_rank() == 0:
+        image.save("output.png")
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+if __name__ == "__main__":
+    main()
+```
+
+```shell
+torchrun --nproc-per-node 4 tensor_parallel_flux.py
+```
+
+`tp_degree` is taken from `world_size` above, so `--nproc-per-node 4` shards the transformer across 4 devices.
+
+### Writing a tensor parallelism plan
+
+Tensor parallelism only works on models that define a `_tp_plan`, a flat class attribute mapping module-name globs to a sharding style. Writing one is mostly a matter of pairing each projection that *expands* the hidden dimension with the projection that *contracts* it back.
+
+Each key may contain **at most one `*`**, and the prefix before it must resolve to an [`nn.ModuleList`](https://pytorch.org/docs/stable/generated/torch.nn.ModuleList.html) so a single entry covers every block. A key without a `*` applies to the model itself. Paths are relative to the model.
+
+#### Colwise and rowwise
+
+| Style | Shards | Each rank | Use for |
+|---|---|---|---|
+| `"colwise"` | output features (`weight` dim 0) | computes a slice of the output | `to_q`, `to_k`, `to_v`, FFN in-projection |
+| `"rowwise"` | input features (`weight` dim 1) | computes a partial sum | `to_out.0`, FFN out-projection |
+
+Always pair them in that order. A `"colwise"` projection leaves its output sharded, the following `"rowwise"` projection consumes that shard directly, and a single `AllReduce` at the block boundary reconstructs the result. Sharding the pair any other way forces a gather in the middle and communicates far more.
+
+For attention this means each rank owns a subset of heads, which is why `tp_degree` must divide the head count. Encoder-stream duplicates (`add_q_proj`, `to_add_out`, `ff_context`) follow the same pattern as their image-stream counterparts.
+
+#### Fused projections
+
+When one `Linear` packs several logical tensors along the dimension being sharded, plain `"colwise"`/`"rowwise"` slices straight across the concatenation and misaligns the pieces. Use `PackedColwiseParallel`/`PackedRowwiseParallel` instead, which shard each packed block independently.
+
+```py
+# in src/diffusers/models/transformers/your_model.py
+from ...hooks.tensor_parallel import PackedColwiseParallel, PackedRowwiseParallel
+```
+
+`blocks` is a list of proportional integers whose sum divides the packed dimension — `[1, 1]` for a SwiGLU gate+up projection of equal halves, or `[1, 1, 1, 3, 3]` for a fused Q+K+V+gate+up projection with `mlp_ratio=3`.
+
+```py
+"transformer_blocks.*.ff.linear_in": PackedColwiseParallel([1, 1]),
+```
+
+When the block sizes are only known from the config, omit the argument and store the absolute sizes on the `Linear` during `__init__` instead, as `_tp_packed_col_blocks` or `_tp_packed_row_blocks`.
+
+```py
+# in the attention module's __init__
+self.to_out._tp_packed_row_blocks = [self.inner_dim, self.mlp_hidden_dim]
+```
+
+```py
+# in the model's _tp_plan
+"single_transformer_blocks.*.attn.to_out": PackedRowwiseParallel(),
+```
+
+Both forms appear in one plan in [`transformer_flux2.py`](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/transformers/transformer_flux2.py): the double-stream SwiGLU pair passes `blocks` literally, while the fused single-stream QKV+MLP projection stores its sizes on the `Linear` in `Flux2ParallelSelfAttention.__init__` because they depend on `mlp_ratio` and `mlp_mult_factor`.
+
+#### What to leave out
+
+Anything absent from the plan stays replicated on every rank, which is the right choice for normalization layers, AdaLN modulation (`img_mod`/`txt_mod`), patch and text embeddings, and the final `norm_out`/`proj_out`. These are small, so sharding them saves little memory while adding communication.
+
+#### Constraints and verification
+
+- `tp_degree` must divide `config.num_attention_heads`. This is validated in [`~ModelMixin.enable_parallelism`].
+- Every packed block must *individually* be divisible by `tp_degree`, not just their sum.
+
+Validate a new plan numerically rather than by eye: generate with a fixed seed on a single device, then again under tensor parallelism, and compare the outputs. A misplaced `"colwise"`/`"rowwise"` usually still runs and produces a plausible but wrong image.
+
+> [!TIP]
+> Start from an existing plan for a similar architecture. [`QwenImageTransformer2DModel`] is fully unfused and every entry is plain `"colwise"`/`"rowwise"`, [`FluxTransformer2DModel`] adds a single packed row-wise projection, and [`Flux2Transformer2DModel`] covers both packed styles — see [`transformer_qwenimage.py`](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/transformers/transformer_qwenimage.py), [`transformer_flux.py`](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/transformers/transformer_flux.py), and [`transformer_flux2.py`](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/transformers/transformer_flux2.py) respectively.
+
+## Choosing a strategy
+
+The strategies above solve different problems, and the useful question is not which is fastest in the abstract but what you are running out of.
+
+| Strategy | Splits | Reduces | Latency for one prompt | Best when |
+|---|---|---|---|---|
+| [Accelerate](#accelerate) / [DDP](#pytorch-distributed) | prompts across replicas | nothing — each device holds a full copy | unchanged | the model already fits and you have many prompts |
+| [`device_map`](#devicemap) | components across devices | weight memory | slightly worse | the model doesn't fit and the interconnect is slow |
+| [Context parallelism](#context-parallelism) | the input sequence | activation memory | lower | sequences are long — high resolution or video |
+| [Tensor parallelism](#tensor-parallelism) | weight matrices | weight memory | lower | one component's weights don't fit and the interconnect is fast |
+
+Some practical guidance:
+
+- **Throughput on many prompts, model already fits.** Use data parallelism. It is the only strategy here that scales throughput linearly without touching the model, and it leaves single-prompt latency alone.
+- **A single component's weights don't fit.** Reach for tensor parallelism first, since it lowers both memory and latency. It communicates at every block boundary, so it wants a fast interconnect like NVLink; over PCIe that per-layer traffic can outweigh the compute it saves, and `device_map` becomes the better choice. `device_map` also handles the case where the components are individually fine but collectively too large.
+- **Activations, not weights, are the problem.** This is the long-sequence regime — large images, many frames — and context parallelism is the direct answer. Pick a backend from the [Ulysses/Ring benchmarks](#ulysses-attention) above.
+- **Both weights and sequence are too large.** Combine tensor and context parallelism. [`TensorParallelConfig`] accepts a `mesh` argument so both can share one device mesh. This combination is not yet validated, so treat it as experimental.

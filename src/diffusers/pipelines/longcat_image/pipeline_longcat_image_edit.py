@@ -108,7 +108,7 @@ def prepare_pos_ids(modality_id=0, type="text", start=(0, 0), num_token=None, he
     if type == "text":
         assert num_token
         if height or width:
-            print('Warning: The parameters of height and width will be ignored in "text" type.')
+            logger.warning('The parameters of height and width will be ignored in "text" type.')
         pos_ids = torch.zeros(num_token, 3)
         pos_ids[..., 0] = modality_id
         pos_ids[..., 1] = torch.arange(num_token) + start[0]
@@ -116,7 +116,7 @@ def prepare_pos_ids(modality_id=0, type="text", start=(0, 0), num_token=None, he
     elif type == "image":
         assert height and width
         if num_token:
-            print('Warning: The parameter of num_token will be ignored in "image" type.')
+            logger.warning('The parameter of num_token will be ignored in "image" type.')
         pos_ids = torch.zeros(height, width, 3)
         pos_ids[..., 0] = modality_id
         pos_ids[..., 1] = pos_ids[..., 1] + torch.arange(height)[:, None] + start[0]
@@ -549,6 +549,37 @@ class LongCatImageEditPipeline(DiffusionPipeline, FromSingleFileMixin):
     ):
         r"""
         Function invoked when calling the pipeline for generation.
+
+        Args:
+            image (`PIL.Image.Image`, *optional*):
+                The input image to edit.
+            prompt (`str` or `list[str]`, *optional*):
+                The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
+            negative_prompt (`str` or `list[str]`, *optional*):
+                The prompt or prompts not to guide the image generation. Ignored when not using guidance.
+            num_inference_steps (`int`, *optional*, defaults to 50):
+                The number of denoising steps.
+            sigmas (`list[float]`, *optional*):
+                Custom sigmas to use for the denoising process. If not defined, the scheduler's default schedule is
+                used.
+            guidance_scale (`float`, *optional*, defaults to 4.5):
+                Classifier-free guidance scale. Values greater than 1 enable CFG.
+            num_images_per_prompt (`int`, *optional*, defaults to 1):
+                The number of images to generate per prompt.
+            generator (`torch.Generator` or `list[torch.Generator]`, *optional*):
+                A `torch.Generator` to make generation deterministic.
+            latents (`torch.FloatTensor`, *optional*):
+                Pre-generated noisy latents to be used as inputs for image generation.
+            prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated text embeddings. If not provided, embeddings are generated from `prompt`.
+            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated negative text embeddings. Used when classifier-free guidance is enabled.
+            output_type (`str`, *optional*, defaults to `"pil"`):
+                The output format of the generated image.
+            return_dict (`bool`, *optional*, defaults to `True`):
+                Whether or not to return a [`~pipelines.LongCatImagePipelineOutput`] instead of a plain tuple.
+            joint_attention_kwargs (`dict`, *optional*):
+                Kwargs passed to the joint attention processor.
 
         Examples:
 

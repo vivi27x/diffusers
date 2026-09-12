@@ -21,6 +21,7 @@ import torch
 
 from ..configuration_utils import ConfigMixin, register_to_config
 from ..utils import BaseOutput, is_scipy_available, logging
+from ..utils.torch_utils import randn_tensor
 from .scheduling_utils import SchedulerMixin
 
 
@@ -363,10 +364,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
         # 5. Convert sigmas and timesteps to tensors and move to specified device
         sigmas = torch.from_numpy(sigmas).to(dtype=torch.float32, device=device)
-        if not is_timesteps_provided:
-            timesteps = sigmas * self.config.num_train_timesteps
-        else:
-            timesteps = torch.from_numpy(timesteps).to(dtype=torch.float32, device=device)
+        timesteps = sigmas * self.config.num_train_timesteps
 
         # 6. Append the terminal sigma value.
         #    If a model requires inverted sigma schedule for denoising but timesteps without inversion, the
@@ -507,7 +505,7 @@ class FlowMatchEulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
         if self.config.stochastic_sampling:
             x0 = sample - current_sigma * model_output
-            noise = torch.randn_like(sample)
+            noise = randn_tensor(sample.shape, generator=generator, device=sample.device, dtype=sample.dtype)
             prev_sample = (1.0 - next_sigma) * x0 + next_sigma * noise
         else:
             prev_sample = sample + dt * model_output

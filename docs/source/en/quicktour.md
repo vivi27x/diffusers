@@ -53,7 +53,7 @@ import torch
 from diffusers import DiffusionPipeline
 
 pipeline = DiffusionPipeline.from_pretrained(
-  "Qwen/Qwen-Image", torch_dtype=torch.bfloat16, device_map="cuda"
+  "Qwen/Qwen-Image", dtype=torch.bfloat16, device_map="cuda"  # or "mps", "xpu", "cpu"
 )
 
 prompt = """
@@ -77,13 +77,13 @@ from diffusers.utils import export_to_video
 vae = AutoencoderKLWan.from_pretrained(
   "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
   subfolder="vae",
-  torch_dtype=torch.float32
+  dtype=torch.float32
 )
 pipeline = DiffusionPipeline.from_pretrained(
   "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
   vae=vae
-  torch_dtype=torch.bfloat16,
-  device_map="cuda"
+  dtype=torch.bfloat16,
+  device_map="cuda"  # or "mps", "xpu", "cpu"
 )
 
 prompt = """
@@ -101,16 +101,16 @@ export_to_video(video, "output.mp4", fps=16)
 
 ## LoRA
 
-Adapters insert a small number of trainable parameters to the original base model. Only the inserted parameters are fine-tuned while the rest of the model weights remain frozen. This makes it fast and cheap to fine-tune a model on a new style. Among adapters, [LoRA's](./tutorials/using_peft_for_inference) are the most popular.
+Adapters insert a small number of trainable parameters to the original base model. Only the inserted parameters are fine-tuned while the rest of the model weights remain frozen. This makes it fast and cheap to fine-tune a model on a new style. Among adapters, [LoRAs](./tutorials/using_peft_for_inference) are the most popular.
 
-Add a LoRA to a pipeline with the [`~loaders.QwenImageLoraLoaderMixin.load_lora_weights`] method. Some LoRA's require a special word to trigger it, such as `Realism`, in the example below. Check a LoRA's model card to see if it requires a trigger word.
+Add a LoRA to a pipeline with the [`~loaders.QwenImageLoraLoaderMixin.load_lora_weights`] method. Some LoRAs require a special word to trigger them, such as `Realism`, in the example below. Check a LoRA's model card to see if it requires a trigger word.
 
 ```py
 import torch
 from diffusers import DiffusionPipeline
 
 pipeline = DiffusionPipeline.from_pretrained(
-  "Qwen/Qwen-Image", torch_dtype=torch.bfloat16, device_map="cuda"
+  "Qwen/Qwen-Image", dtype=torch.bfloat16, device_map="cuda"  # or "mps", "xpu", "cpu"
 )
 pipeline.load_lora_weights(
   "flymy-ai/qwen-image-realism-lora",
@@ -145,9 +145,9 @@ quant_config = PipelineQuantizationConfig(
 )
 pipeline = DiffusionPipeline.from_pretrained(
   "Qwen/Qwen-Image",
-  torch_dtype=torch.bfloat16,
+  dtype=torch.bfloat16,
   quantization_config=quant_config,
-  device_map="cuda"
+  device_map="cuda"  # or "mps", "xpu", "cpu"
 )
 
 prompt = """
@@ -187,9 +187,9 @@ quant_config = PipelineQuantizationConfig(
 )
 pipeline = DiffusionPipeline.from_pretrained(
   "Qwen/Qwen-Image",
-  torch_dtype=torch.bfloat16,
+  dtype=torch.bfloat16,
   quantization_config=quant_config,
-  device_map="cuda"
+  device_map="cuda"  # or "mps", "xpu", "cpu"
 )
 pipeline.enable_model_cpu_offload()
 
@@ -216,7 +216,7 @@ import torch
 from diffusers import DiffusionPipeline
 
 pipeline = DiffusionPipeline.from_pretrained(
-  "Qwen/Qwen-Image", torch_dtype=torch.bfloat16, device_map="cuda"
+  "Qwen/Qwen-Image", dtype=torch.bfloat16, device_map="cuda"  # or "mps", "xpu", "cpu"
 )
 
 pipeline.transformer.compile_repeated_blocks(

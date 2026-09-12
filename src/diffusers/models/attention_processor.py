@@ -1,4 +1,4 @@
-# Copyright 2025 The HuggingFace Team. All rights reserved.
+# Copyright 2026 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -2140,7 +2140,7 @@ class AuraFlowAttnProcessor2_0:
             if attn.norm_added_q is not None:
                 encoder_hidden_states_query_proj = attn.norm_added_q(encoder_hidden_states_query_proj)
             if attn.norm_added_k is not None:
-                encoder_hidden_states_key_proj = attn.norm_added_q(encoder_hidden_states_key_proj)
+                encoder_hidden_states_key_proj = attn.norm_added_k(encoder_hidden_states_key_proj)
 
             query = torch.cat([encoder_hidden_states_query_proj, query], dim=1)
             key = torch.cat([encoder_hidden_states_key_proj, key], dim=1)
@@ -2237,7 +2237,7 @@ class FusedAuraFlowAttnProcessor2_0:
             if attn.norm_added_q is not None:
                 encoder_hidden_states_query_proj = attn.norm_added_q(encoder_hidden_states_query_proj)
             if attn.norm_added_k is not None:
-                encoder_hidden_states_key_proj = attn.norm_added_q(encoder_hidden_states_key_proj)
+                encoder_hidden_states_key_proj = attn.norm_added_k(encoder_hidden_states_key_proj)
 
             query = torch.cat([encoder_hidden_states_query_proj, query], dim=1)
             key = torch.cat([encoder_hidden_states_key_proj, key], dim=1)

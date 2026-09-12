@@ -24,7 +24,7 @@ from ...loaders import QwenImageLoraLoaderMixin
 from ...models import AutoencoderKLQwenImage, QwenImageTransformer2DModel
 from ...models.controlnets.controlnet_qwenimage import QwenImageControlNetModel, QwenImageMultiControlNetModel
 from ...schedulers import FlowMatchEulerDiscreteScheduler
-from ...utils import deprecate, is_torch_xla_available, logging, replace_example_docstring
+from ...utils import is_torch_xla_available, logging, replace_example_docstring
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
 from .pipeline_output import QwenImagePipelineOutput
@@ -101,7 +101,7 @@ EXAMPLE_DOC_STRING = """
 """
 
 
-# Coped from diffusers.pipelines.qwenimage.pipeline_qwenimage.calculate_shift
+# Copied from diffusers.pipelines.qwenimage.pipeline_qwenimage.calculate_shift
 def calculate_shift(
     image_seq_len,
     base_seq_len: int = 256,
@@ -203,9 +203,8 @@ class QwenImageControlNetPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         text_encoder ([`Qwen2.5-VL-7B-Instruct`]):
             [Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct), specifically the
             [Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) variant.
-        tokenizer (`QwenTokenizer`):
-            Tokenizer of class
-            [CLIPTokenizer](https://huggingface.co/docs/transformers/en/model_doc/clip#transformers.CLIPTokenizer).
+        tokenizer (`Qwen2Tokenizer`):
+            Tokenizer of class https://huggingface.co/docs/transformers/en/model_doc/qwen2#transformers.Qwen2Tokenizer
     """
 
     model_cpu_offload_seq = "text_encoder->transformer->vae"
@@ -239,7 +238,7 @@ class QwenImageControlNetPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         self.prompt_template_encode_start_idx = 34
         self.default_sample_size = 128
 
-    # Coped from diffusers.pipelines.qwenimage.pipeline_qwenimage.extract_masked_hidden
+    # Copied from diffusers.pipelines.qwenimage.pipeline_qwenimage.QwenImagePipeline._extract_masked_hidden
     def _extract_masked_hidden(self, hidden_states: torch.Tensor, mask: torch.Tensor):
         bool_mask = mask.bool()
         valid_lengths = bool_mask.sum(dim=1)
@@ -248,7 +247,7 @@ class QwenImageControlNetPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
         return split_result
 
-    # Coped from diffusers.pipelines.qwenimage.pipeline_qwenimage.get_qwen_prompt_embeds
+    # Copied from diffusers.pipelines.qwenimage.pipeline_qwenimage.QwenImagePipeline._get_qwen_prompt_embeds
     def _get_qwen_prompt_embeds(
         self,
         prompt: str | list[str] = None,
@@ -287,7 +286,7 @@ class QwenImageControlNetPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
         return prompt_embeds, encoder_attention_mask
 
-    # Coped from diffusers.pipelines.qwenimage.pipeline_qwenimage.encode_prompt
+    # Copied from diffusers.pipelines.qwenimage.pipeline_qwenimage.QwenImagePipeline.encode_prompt
     def encode_prompt(
         self,
         prompt: str | list[str],
@@ -318,11 +317,13 @@ class QwenImageControlNetPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         if prompt_embeds is None:
             prompt_embeds, prompt_embeds_mask = self._get_qwen_prompt_embeds(prompt, device)
 
+        prompt_embeds = prompt_embeds[:, :max_sequence_length]
         _, seq_len, _ = prompt_embeds.shape
         prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
         prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
 
         if prompt_embeds_mask is not None:
+            prompt_embeds_mask = prompt_embeds_mask[:, :max_sequence_length]
             prompt_embeds_mask = prompt_embeds_mask.repeat(1, num_images_per_prompt, 1)
             prompt_embeds_mask = prompt_embeds_mask.view(batch_size * num_images_per_prompt, seq_len)
 
@@ -374,6 +375,22 @@ class QwenImageControlNetPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                 f" {negative_prompt_embeds}. Please make sure to only forward one of the two."
             )
 
+        if prompt_embeds is not None and prompt_embeds_mask is None:
+            logger.warning(
+                "`prompt_embeds` is provided and `prompt_embeds_mask` is not provided, so the model will treat all"
+                " prompt tokens as valid. If `prompt_embeds` contains padding, you should provide the padding mask as"
+                " `prompt_embeds_mask`. Make sure to generate `prompt_embeds_mask` from the same text encoder that was"
+                " used to generate `prompt_embeds`."
+            )
+
+        if negative_prompt_embeds is not None and negative_prompt_embeds_mask is None:
+            logger.warning(
+                "`negative_prompt_embeds` is provided and `negative_prompt_embeds_mask` is not provided, so the model will treat all"
+                " negative prompt tokens as valid. If `negative_prompt_embeds` contains padding, you should provide the padding mask as"
+                " `negative_prompt_embeds_mask`. Make sure to generate `negative_prompt_embeds_mask` from the same text encoder that was"
+                " used to generate `negative_prompt_embeds`."
+            )
+
         if max_sequence_length is not None and max_sequence_length > 1024:
             raise ValueError(f"`max_sequence_length` cannot be greater than 1024 but is {max_sequence_length}")
 
@@ -402,59 +419,6 @@ class QwenImageControlNetPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         latents = latents.reshape(batch_size, channels // (2 * 2), 1, height, width)
 
         return latents
-
-    def enable_vae_slicing(self):
-        r"""
-        Enable sliced VAE decoding. When this option is enabled, the VAE will split the input tensor in slices to
-        compute decoding in several steps. This is useful to save some memory and allow larger batch sizes.
-        """
-        depr_message = f"Calling `enable_vae_slicing()` on a `{self.__class__.__name__}` is deprecated and this method will be removed in a future version. Please use `pipe.vae.enable_slicing()`."
-        deprecate(
-            "enable_vae_slicing",
-            "0.40.0",
-            depr_message,
-        )
-        self.vae.enable_slicing()
-
-    def disable_vae_slicing(self):
-        r"""
-        Disable sliced VAE decoding. If `enable_vae_slicing` was previously enabled, this method will go back to
-        computing decoding in one step.
-        """
-        depr_message = f"Calling `disable_vae_slicing()` on a `{self.__class__.__name__}` is deprecated and this method will be removed in a future version. Please use `pipe.vae.disable_slicing()`."
-        deprecate(
-            "disable_vae_slicing",
-            "0.40.0",
-            depr_message,
-        )
-        self.vae.disable_slicing()
-
-    def enable_vae_tiling(self):
-        r"""
-        Enable tiled VAE decoding. When this option is enabled, the VAE will split the input tensor into tiles to
-        compute decoding and encoding in several steps. This is useful for saving a large amount of memory and to allow
-        processing larger images.
-        """
-        depr_message = f"Calling `enable_vae_tiling()` on a `{self.__class__.__name__}` is deprecated and this method will be removed in a future version. Please use `pipe.vae.enable_tiling()`."
-        deprecate(
-            "enable_vae_tiling",
-            "0.40.0",
-            depr_message,
-        )
-        self.vae.enable_tiling()
-
-    def disable_vae_tiling(self):
-        r"""
-        Disable tiled VAE decoding. If `enable_vae_tiling` was previously enabled, this method will go back to
-        computing decoding in one step.
-        """
-        depr_message = f"Calling `disable_vae_tiling()` on a `{self.__class__.__name__}` is deprecated and this method will be removed in a future version. Please use `pipe.vae.disable_tiling()`."
-        deprecate(
-            "disable_vae_tiling",
-            "0.40.0",
-            depr_message,
-        )
-        self.vae.disable_tiling()
 
     # Copied from diffusers.pipelines.qwenimage.pipeline_qwenimage.QwenImagePipeline.prepare_latents
     def prepare_latents(
@@ -613,6 +577,15 @@ class QwenImageControlNetPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                 ignored when not using guidance distilled models. To enable traditional classifier-free guidance,
                 please pass `true_cfg_scale > 1.0` and `negative_prompt` (even an empty negative prompt like " " should
                 enable classifier-free guidance computations).
+            control_guidance_start (`float` or `list[float]`, *optional*, defaults to 0.0):
+                The percentage of total steps at which the ControlNet starts applying.
+            control_guidance_end (`float` or `list[float]`, *optional*, defaults to 1.0):
+                The percentage of total steps at which the ControlNet stops applying.
+            control_image (`PipelineImageInput`, *optional*):
+                The ControlNet input condition to provide guidance for the generation.
+            controlnet_conditioning_scale (`float` or `list[float]`, *optional*, defaults to 1.0):
+                The outputs of the ControlNet are multiplied by `controlnet_conditioning_scale` before they are added
+                to the residual in the original `transformer`.
             num_images_per_prompt (`int`, *optional*, defaults to 1):
                 The number of images to generate per prompt.
             generator (`torch.Generator` or `list[torch.Generator]`, *optional*):
@@ -625,10 +598,14 @@ class QwenImageControlNetPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
                 provided, text embeddings will be generated from `prompt` input argument.
+            prompt_embeds_mask (`torch.Tensor`, *optional*):
+                Attention mask for `prompt_embeds`.
             negative_prompt_embeds (`torch.Tensor`, *optional*):
                 Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
                 weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
                 argument.
+            negative_prompt_embeds_mask (`torch.Tensor`, *optional*):
+                Attention mask for `negative_prompt_embeds`.
             output_type (`str`, *optional*, defaults to `"pil"`):
                 The output format of the generate image. Choose between
                 [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
@@ -700,9 +677,7 @@ class QwenImageControlNetPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
         device = self._execution_device
 
-        has_neg_prompt = negative_prompt is not None or (
-            negative_prompt_embeds is not None and negative_prompt_embeds_mask is not None
-        )
+        has_neg_prompt = negative_prompt is not None or negative_prompt_embeds is not None
 
         if true_cfg_scale > 1 and not has_neg_prompt:
             logger.warning(
